@@ -1,0 +1,23 @@
+[package]
+name = "bankr-agent-api"
+description = "Rust client library for the Bankr Agent API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation = "https://docs.rs/bankr-agent-api"
+keywords = ["bankr", "api", "client", "crypto", "defi"]
+categories = ["api-bindings", "web-programming::http-client", "asynchronous"]
+
+[dependencies]
+hpx-transport = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
