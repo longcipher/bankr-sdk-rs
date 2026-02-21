@@ -142,7 +142,3 @@ just build
 # Generate and open documentation
 just docs
 ```
-
-## License
-
-Apache-2.0 — see [LICENSE](LICENSE).

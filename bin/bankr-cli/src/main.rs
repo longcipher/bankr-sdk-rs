@@ -1,14 +1,29 @@
 //! # bankr-cli
 //!
-//! Command-line tool for interacting with the Bankr Agent API.
+//! Bankr AI agent CLI — interact with the Bankr Agent API from the terminal.
+//!
+//! ## Commands
+//!
+//! | Command  | Description                                  |
+//! |----------|----------------------------------------------|
+//! | login    | Authenticate with the Bankr API              |
+//! | logout   | Clear stored credentials                     |
+//! | config   | Manage CLI configuration                     |
+//! | whoami   | Show current authentication info             |
+//! | prompt   | Send a prompt to the Bankr AI agent          |
+//! | status   | Check the status of a job                    |
+//! | cancel   | Cancel a running job                         |
+//! | sign     | Sign messages, typed data, or transactions   |
+//! | skills   | Show all Bankr AI agent skills with examples |
+//! | submit   | Submit a transaction to the blockchain       |
 //!
 //! ## Usage
 //!
 //! ```text
-//! export BANKR_API_KEY=your_api_key_here
+//! bankr-cli login
 //! bankr-cli whoami
 //! bankr-cli prompt "what is the price of ETH?"
-//! bankr-cli job <job_id>
+//! bankr-cli status <job_id>
 //! bankr-cli cancel <job_id>
 //! bankr-cli sign personal "Hello, Bankr!"
 //! bankr-cli submit --chain-id 8453 --to 0x... --value "1000000000000000000"
@@ -17,26 +32,32 @@
 // CLI binary — allow print macros and expect/unwrap for user-facing output.
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::unwrap_used, clippy::expect_used)]
 
-use std::time::Duration;
+mod commands;
+pub mod config;
+pub mod display;
 
-use bankr_agent_api::{
-    BankrAgentClient,
-    types::{EvmTransaction, PromptRequest, SignRequest, SignatureType, SubmitRequest},
-};
+use std::path::PathBuf;
+
+use bankr_agent_api::BankrAgentClient;
 use clap::{Parser, Subcommand};
+use commands::sign::SignCommands;
 use eyre::{Result, WrapErr, eyre};
 
-/// Bankr Agent API command-line interface.
+/// Bankr AI agent CLI.
 #[derive(Debug, Parser)]
-#[command(name = "bankr-cli", version, about = "CLI for the Bankr Agent API")]
+#[command(name = "bankr-cli", version, about = "Bankr AI agent CLI")]
 struct Cli {
-    /// Bankr API key (overrides BANKR_API_KEY env var).
+    /// Bankr API key (overrides BANKR_API_KEY env var and config file).
     #[arg(long, env = "BANKR_API_KEY", global = true, hide_env_values = true)]
     api_key: Option<String>,
 
     /// Base URL override (default: https://api.bankr.bot).
     #[arg(long, env = "BANKR_BASE_URL", global = true)]
     base_url: Option<String>,
+
+    /// Path to the configuration file.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
 
     /// Output raw JSON instead of pretty-printed.
     #[arg(long, global = true, default_value_t = false)]
@@ -48,10 +69,23 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Retrieve your account profile (wallets, socials, Bankr Club status).
+    /// Authenticate with the Bankr API.
+    Login {
+        /// API key to store. If omitted you will be prompted interactively.
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+
+    /// Clear stored credentials.
+    Logout,
+
+    /// Manage CLI configuration.
+    Config,
+
+    /// Show current authentication info.
     Whoami,
 
-    /// Submit a natural language prompt to the Bankr AI agent.
+    /// Send a prompt to the Bankr AI agent.
     Prompt {
         /// The prompt text.
         prompt: String,
@@ -73,25 +107,29 @@ enum Commands {
         max_attempts: u32,
     },
 
-    /// Get the status of a submitted job.
-    Job {
+    /// Check the status of a job.
+    #[command(alias = "job")]
+    Status {
         /// Job ID to query.
         job_id: String,
     },
 
-    /// Cancel a pending or processing job.
+    /// Cancel a running job.
     Cancel {
         /// Job ID to cancel.
         job_id: String,
     },
 
-    /// Sign a message, typed data, or transaction.
+    /// Sign messages, typed data, or transactions.
     Sign {
         #[command(subcommand)]
         kind: SignCommands,
     },
 
-    /// Submit a raw EVM transaction to the blockchain.
+    /// Show all Bankr AI agent skills with examples.
+    Skills,
+
+    /// Submit a transaction to the blockchain.
     Submit {
         /// Destination address.
         #[arg(long)]
@@ -135,40 +173,6 @@ enum Commands {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum SignCommands {
-    /// Sign a plain text message (personal_sign).
-    Personal {
-        /// The message to sign.
-        message: String,
-    },
-
-    /// Sign EIP-712 typed data (pass JSON string).
-    TypedData {
-        /// JSON string of the typed data object.
-        typed_data_json: String,
-    },
-
-    /// Sign an EVM transaction without broadcasting.
-    Transaction {
-        /// Destination address.
-        #[arg(long)]
-        to: String,
-
-        /// Chain ID.
-        #[arg(long)]
-        chain_id: u64,
-
-        /// Value in wei.
-        #[arg(long)]
-        value: Option<String>,
-
-        /// Calldata (hex).
-        #[arg(long)]
-        data: Option<String>,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialise tracing from RUST_LOG env var (default: warn).
@@ -181,18 +185,55 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let api_key =
-        cli.api_key.ok_or_else(|| eyre!("BANKR_API_KEY env var or --api-key flag is required"))?;
+    let config_path = cli
+        .config
+        .clone()
+        .or_else(config::default_config_path)
+        .ok_or_else(|| eyre!("cannot determine config file path (HOME not set?)"))?;
 
-    let client = match &cli.base_url {
-        Some(url) => BankrAgentClient::with_base_url(&api_key, url).map_err(|e| eyre!("{e}"))?,
-        None => BankrAgentClient::new(&api_key).map_err(|e| eyre!("{e}"))?,
-    };
+    // -----------------------------------------------------------------
+    // Commands that do NOT require an API key
+    // -----------------------------------------------------------------
+    match &cli.command {
+        Commands::Login { api_key } => {
+            return commands::auth::cmd_login(
+                api_key.as_deref(),
+                cli.base_url.as_deref(),
+                &config_path,
+            )
+            .await;
+        }
+        Commands::Logout => {
+            return commands::auth::cmd_logout(&config_path);
+        }
+        Commands::Config => {
+            return commands::config_cmd::cmd_config(&config_path);
+        }
+        _ => {} // fall through to API-key-requiring commands
+    }
+
+    // -----------------------------------------------------------------
+    // Resolve API key: flag > env > config
+    // -----------------------------------------------------------------
+    let cfg = config::load(&config_path);
+    let api_key = config::resolve_api_key(cli.api_key.as_deref(), None, &cfg).ok_or_else(|| {
+        eyre!(
+            "API key required. Set via --api-key, BANKR_API_KEY env var, or run `bankr-cli login`."
+        )
+    })?;
+
+    let base_url =
+        cli.base_url.as_deref().or(cfg.api_url.as_deref()).unwrap_or("https://api.bankr.bot");
+
+    let client = BankrAgentClient::with_base_url(&api_key, base_url).map_err(|e| eyre!("{e}"))?;
 
     match cli.command {
-        Commands::Whoami => cmd_whoami(&client, cli.raw).await,
+        Commands::Whoami => {
+            commands::whoami::cmd_whoami(&client, cli.raw, &config_path, &api_key, base_url).await
+        }
+        Commands::Skills => commands::skills::cmd_skills(&client, cli.raw).await,
         Commands::Prompt { prompt, thread_id, wait, poll_interval, max_attempts } => {
-            cmd_prompt(
+            commands::prompt::cmd_prompt(
                 &client,
                 &prompt,
                 thread_id.as_deref(),
@@ -203,9 +244,9 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::Job { job_id } => cmd_job(&client, &job_id, cli.raw).await,
-        Commands::Cancel { job_id } => cmd_cancel(&client, &job_id, cli.raw).await,
-        Commands::Sign { kind } => cmd_sign(&client, kind, cli.raw).await,
+        Commands::Status { job_id } => commands::job::cmd_job(&client, &job_id, cli.raw).await,
+        Commands::Cancel { job_id } => commands::job::cmd_cancel(&client, &job_id, cli.raw).await,
+        Commands::Sign { kind } => commands::sign::cmd_sign(&client, kind, cli.raw).await,
         Commands::Submit {
             to,
             chain_id,
@@ -218,7 +259,7 @@ async fn main() -> Result<()> {
             description,
             no_wait,
         } => {
-            cmd_submit(
+            commands::submit::cmd_submit(
                 &client,
                 &to,
                 chain_id,
@@ -234,132 +275,16 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        // Login / Logout / Config already handled above.
+        Commands::Login { .. } | Commands::Logout | Commands::Config => unreachable!(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand handlers
-// ---------------------------------------------------------------------------
-
-async fn cmd_whoami(client: &BankrAgentClient, raw: bool) -> Result<()> {
-    let resp = client.get_me().await.map_err(|e| eyre!("{e}"))?;
-    print_json(&resp, raw)
-}
-
-async fn cmd_prompt(
-    client: &BankrAgentClient,
-    prompt: &str,
-    thread_id: Option<&str>,
-    wait: bool,
-    poll_interval: u64,
-    max_attempts: u32,
-    raw: bool,
-) -> Result<()> {
-    let req =
-        PromptRequest { prompt: prompt.to_owned(), thread_id: thread_id.map(ToOwned::to_owned) };
-
-    if wait {
-        let job = client
-            .prompt_and_wait_with(&req, Duration::from_secs(poll_interval), max_attempts)
-            .await
-            .map_err(|e| eyre!("{e}"))?;
-        print_json(&job, raw)
-    } else {
-        let resp = client.submit_prompt(&req).await.map_err(|e| eyre!("{e}"))?;
-        print_json(&resp, raw)
-    }
-}
-
-async fn cmd_job(client: &BankrAgentClient, job_id: &str, raw: bool) -> Result<()> {
-    let resp = client.get_job(job_id).await.map_err(|e| eyre!("{e}"))?;
-    print_json(&resp, raw)
-}
-
-async fn cmd_cancel(client: &BankrAgentClient, job_id: &str, raw: bool) -> Result<()> {
-    let resp = client.cancel_job(job_id).await.map_err(|e| eyre!("{e}"))?;
-    print_json(&resp, raw)
-}
-
-async fn cmd_sign(client: &BankrAgentClient, kind: SignCommands, raw: bool) -> Result<()> {
-    let req = match kind {
-        SignCommands::Personal { message } => SignRequest {
-            signature_type: SignatureType::PersonalSign,
-            message: Some(message),
-            typed_data: None,
-            transaction: None,
-        },
-        SignCommands::TypedData { typed_data_json } => {
-            let typed_data: serde_json::Value =
-                serde_json::from_str(&typed_data_json).wrap_err("Invalid typed-data JSON")?;
-            SignRequest {
-                signature_type: SignatureType::EthSignTypedDataV4,
-                message: None,
-                typed_data: Some(typed_data),
-                transaction: None,
-            }
-        }
-        SignCommands::Transaction { to, chain_id, value, data } => SignRequest {
-            signature_type: SignatureType::EthSignTransaction,
-            message: None,
-            typed_data: None,
-            transaction: Some(EvmTransaction {
-                to,
-                chain_id,
-                value,
-                data,
-                gas: None,
-                gas_price: None,
-                max_fee_per_gas: None,
-                max_priority_fee_per_gas: None,
-                nonce: None,
-            }),
-        },
-    };
-
-    let resp = client.sign(&req).await.map_err(|e| eyre!("{e}"))?;
-    print_json(&resp, raw)
-}
-
-#[expect(clippy::too_many_arguments)]
-async fn cmd_submit(
-    client: &BankrAgentClient,
-    to: &str,
-    chain_id: u64,
-    value: Option<String>,
-    data: Option<String>,
-    gas: Option<String>,
-    max_fee_per_gas: Option<String>,
-    max_priority_fee_per_gas: Option<String>,
-    nonce: Option<u64>,
-    description: Option<String>,
-    no_wait: bool,
-    raw: bool,
-) -> Result<()> {
-    let req = SubmitRequest {
-        transaction: EvmTransaction {
-            to: to.to_owned(),
-            chain_id,
-            value,
-            data,
-            gas,
-            gas_price: None,
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-            nonce,
-        },
-        description,
-        wait_for_confirmation: Some(!no_wait),
-    };
-
-    let resp = client.submit_transaction(&req).await.map_err(|e| eyre!("{e}"))?;
-    print_json(&resp, raw)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn print_json<T: serde::Serialize>(value: &T, raw: bool) -> Result<()> {
+pub(crate) fn print_json<T: serde::Serialize>(value: &T, raw: bool) -> Result<()> {
     let output = if raw {
         serde_json::to_string(value).wrap_err("JSON serialization failed")?
     } else {
