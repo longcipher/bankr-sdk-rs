@@ -2,7 +2,6 @@
 
 [![crates.io](https://img.shields.io/crates/v/bankr-agent-api.svg)](https://crates.io/crates/bankr-agent-api)
 [![docs.rs](https://docs.rs/bankr-agent-api/badge.svg)](https://docs.rs/bankr-agent-api)
-[![License](https://img.shields.io/crates/l/bankr-agent-api)](LICENSE)
 
 Rust SDK and CLI for the [Bankr Agent API](https://docs.bankr.bot/agent-api/overview).
 
